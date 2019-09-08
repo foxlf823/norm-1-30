@@ -58,10 +58,10 @@ def load_metamap_result_from_file(file_path):
                 bracket_spans = re_brackets.findall(span)
                 if len(bracket_spans) == 0: # simple form
                     if span.find(u',') != -1:
-                        print("ignore non-continuous form of Positional_Information: {} in {}".format(triggers[idx],
-                                                                                                  file_path[
-                                                                                                  file_path.rfind(
-                                                                                                      '/') + 1:]))
+                        # print("ignore non-continuous form of Positional_Information: {} in {}".format(triggers[idx],
+                        #                                                                           file_path[
+                        #                                                                           file_path.rfind(
+                        #                                                                               '/') + 1:]))
                         continue
 
 
@@ -73,10 +73,7 @@ def load_metamap_result_from_file(file_path):
                     tmps = triggers[idx].split(u"-")
 
                     if tmps[3].find('"') == -1:
-                        print("ignore non-string entity: {} in {}".format(tmps[3],
-                                                                                                  file_path[
-                                                                                                  file_path.rfind(
-                                                                                                      '/') + 1:]))
+                        # print("ignore non-string entity: {} in {}".format(tmps[3], file_path[file_path.rfind('/') + 1:]))
                         continue
 
 
@@ -86,10 +83,10 @@ def load_metamap_result_from_file(file_path):
                 else:
                     for bracket_span in bracket_spans:
                         if bracket_span.find(u',') != -1:
-                            print("ignore non-continuous form of Positional_Information: {} in {}".format(triggers[idx],
-                                                                                                      file_path[
-                                                                                                      file_path.rfind(
-                                                                                                          '/') + 1:]))
+                            # print("ignore non-continuous form of Positional_Information: {} in {}".format(triggers[idx],
+                            #                                                                           file_path[
+                            #                                                                           file_path.rfind(
+                            #                                                                               '/') + 1:]))
                             continue
 
                         tmps = bracket_span[1:-1].split(u"/")
@@ -100,10 +97,10 @@ def load_metamap_result_from_file(file_path):
                         tmps = triggers[idx].split(u"-")
 
                         if tmps[3].find('"') == -1:
-                            print("ignore non-string entity: {} in {}".format(tmps[3],
-                                                                              file_path[
-                                                                              file_path.rfind(
-                                                                                  '/') + 1:]))
+                            # print("ignore non-string entity: {} in {}".format(tmps[3],
+                            #                                                   file_path[
+                            #                                                   file_path.rfind(
+                            #                                                       '/') + 1:]))
                             continue
 
                         entity.name = tmps[3][1:-1]

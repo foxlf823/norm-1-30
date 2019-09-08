@@ -253,15 +253,21 @@ def evaluate_for_ehr(gold_entities, pred_entities, dictionary):
     ct_norm_predict = len(pred_entities)
     ct_norm_correct = 0
 
-    for predict_entity in pred_entities:
 
+    wrong_entity = []
+
+    for predict_entity in pred_entities:
+        norm_correct = False
+        span_correct = False
         for gold_entity in gold_entities:
 
             if predict_entity.equals_span(gold_entity):
+                span_correct = True
 
                 if len(gold_entity.norm_ids) == 0:
                     # if gold_entity not annotated, we count it as TP
                     ct_norm_correct += 1
+                    # norm_correct = True
                 else:
 
                     if len(predict_entity.norm_ids) != 0 and predict_entity.norm_ids[0] in dictionary:
@@ -269,8 +275,20 @@ def evaluate_for_ehr(gold_entities, pred_entities, dictionary):
 
                         if gold_entity.norm_ids[0] in concept.codes:
                             ct_norm_correct += 1
+                            norm_correct = True
+                        else:
+                            print("gold: {} {} {} | pred: {} {}".format(
+                                                                        gold_entity.name, gold_entity.norm_ids[0],
+                                                                        gold_entity.norm_names[0], concept.codes,
+                                                                        concept.names))
 
                 break
+
+        # if norm_correct==False and span_correct==True:
+        #     print("pred: {} {} | gold: {} {} {}".format(predict_entity.name, predict_entity.norm_ids[0],
+        #                                           gold_entity.name, gold_entity.norm_ids[0], gold_entity.norm_names[0]))
+        #     wrong_entity.append(predict_entity)
+
 
     return ct_norm_gold, ct_norm_predict, ct_norm_correct
 

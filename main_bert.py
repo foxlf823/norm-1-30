@@ -27,6 +27,7 @@ from data_structure import Document
 tokenizer = BertTokenizer.from_pretrained(opt.bert_dir)
 import codecs
 import re
+import torch.nn.functional as functional
 
 from stopword import stop_word
 
@@ -145,12 +146,43 @@ def my_collate(batch):
 
     y = torch.LongTensor(y).view(-1)
 
+    lengths = torch.LongTensor(lengths)
+
     if opt.gpu >= 0 and torch.cuda.is_available():
         tokens = tokens.cuda(opt.gpu)
         mask = mask.cuda(opt.gpu)
         sentences = sentences.cuda(opt.gpu)
         y = y.cuda(opt.gpu)
-    return tokens, mask, sentences, y
+    return tokens, mask, sentences, y, lengths
+
+
+class DotAttentionLayer(nn.Module):
+    def __init__(self, hidden_size):
+        super(DotAttentionLayer, self).__init__()
+        self.hidden_size = hidden_size
+        self.W = nn.Linear(hidden_size, 1, bias=False)
+        self.W.weight.data.copy_(torch.ones((1, hidden_size)))
+
+    def forward(self, inputs, lengths):
+        """
+        input: (unpacked_padded_output: batch_size x seq_len x hidden_size, lengths: batch_size)
+        """
+        batch_size, max_len, _ = inputs.size()
+        flat_input = inputs.contiguous().view(-1, self.hidden_size)
+        logits = self.W(flat_input).view(batch_size, max_len)
+        alphas = functional.softmax(logits, dim=1)
+
+        # computing mask
+        idxes = torch.arange(0, max_len, out=torch.LongTensor(max_len)).unsqueeze(0)
+        if opt.gpu >= 0 and torch.cuda.is_available():
+            idxes = idxes.cuda(opt.gpu)
+        mask = (idxes<lengths.unsqueeze(1)).float()
+
+        alphas = alphas * mask
+        # renormalize
+        alphas = alphas / torch.sum(alphas, 1).view(-1, 1)
+
+        return alphas
 
 class BertForSequenceClassification(BertPreTrainedModel):
 
@@ -166,11 +198,11 @@ class BertForSequenceClassification(BertPreTrainedModel):
         self.criterion = nn.CrossEntropyLoss()
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
-        _, pooled_output = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
+        encoded_layers, pooled_output = self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=False)
         pooled_output = self.dropout(pooled_output)
         logits = self.classifier(pooled_output)
 
-        return logits
+        return encoded_layers, logits
 
     def loss(self, y_pred, y_gold):
 
@@ -188,9 +220,9 @@ class BertForSequenceClassification(BertPreTrainedModel):
 
         for i in range(num_iter):
 
-            x, mask, sentences, _ = next(data_iter)
+            x, mask, sentences, _, _ = next(data_iter)
 
-            y_pred = self.forward(x, sentences, mask)
+            _, y_pred = self.forward(x, sentences, mask)
 
             values, indices = torch.max(y_pred, 1)
 
@@ -206,12 +238,14 @@ class BertForSequenceClassification(BertPreTrainedModel):
 
             entity_start += actual_batch_size
 
-
-def evaluate_for_ehr(gold_entities, pred_entities, dictionary):
+from collections import Counter
+def evaluate_for_ehr(gold_entities, pred_entities, dictionary, metamap_entities, correct_counter, wrong_counter):
 
     ct_norm_gold = len(gold_entities)
     ct_norm_predict = len(pred_entities)
     ct_norm_correct = 0
+
+
 
     for predict_entity in pred_entities:
 
@@ -229,6 +263,45 @@ def evaluate_for_ehr(gold_entities, pred_entities, dictionary):
 
                         if gold_entity.norm_ids[0] in concept.codes:
                             ct_norm_correct += 1
+                            for metamap_entity in metamap_entities:
+                                if metamap_entity.equals_span(predict_entity):
+                                    if len(metamap_entity.norm_ids) != 0 and metamap_entity.norm_ids[0] in dictionary:
+                                        metamap_concept = dictionary[metamap_entity.norm_ids[0]]
+                                        if gold_entity.norm_ids[0] not in metamap_concept.codes:
+                                            # print("bert right : {} {} {} | metamap wrong: {} {}".format(
+                                            #     gold_entity.name, gold_entity.norm_ids[0],
+                                            #     gold_entity.norm_names[0], metamap_concept.codes,
+                                            #     metamap_concept.names))
+                                            pass
+
+                            term_name = predict_entity.name.lower()
+                            if term_name in correct_counter:
+                                correct_counter[term_name] += 1
+                            else:
+                                correct_counter[term_name] = 1
+
+                        else:
+                            # print("gold: {} {} {} | pred: {} {}".format(
+                            #     gold_entity.name, gold_entity.norm_ids[0],
+                            #     gold_entity.norm_names[0], concept.codes,
+                            #     concept.names))
+                            for metamap_entity in metamap_entities:
+                                if metamap_entity.equals_span(predict_entity):
+                                    if len(metamap_entity.norm_ids) != 0 and metamap_entity.norm_ids[0] in dictionary:
+                                        metamap_concept = dictionary[metamap_entity.norm_ids[0]]
+                                        if gold_entity.norm_ids[0] in metamap_concept.codes:
+                                            # print("metamap right : {} {} {} | bert wrong: {} {}".format(
+                                            #     gold_entity.name, gold_entity.norm_ids[0],
+                                            #     gold_entity.norm_names[0], concept.codes,
+                                            #     concept.names))
+                                            pass
+
+                            term_name = predict_entity.name.lower()
+                            if term_name in wrong_counter:
+                                wrong_counter[term_name] += 1
+                            else:
+                                wrong_counter[term_name] = 1
+
 
                 break
 
@@ -340,9 +413,9 @@ def train(train_data, dev_data, test_data, d, dictionary, dictionary_reverse, op
 
         for i in range(num_iter):
 
-            x, mask, sentences, y = next(train_iter)
+            x, mask, sentences, y, _ = next(train_iter)
 
-            y_pred = model.forward(x, sentences, mask)
+            _, y_pred = model.forward(x, sentences, mask)
 
             l = model.loss(y_pred, y)
 
@@ -389,6 +462,55 @@ def train(train_data, dev_data, test_data, d, dictionary, dictionary_reverse, op
 
     return best_dev_p, best_dev_r, best_dev_f
 
+from my_utils import get_bioc_file, get_text_file
+import metamap
+type_we_care = set(['ADE', 'SSLIF', 'Indication'])
+
+def parse_one_gold_file(annotation_dir, corpus_dir, fileName):
+    document = Document()
+    document.name = fileName[:fileName.find('.')]
+
+    annotation_file = get_bioc_file(os.path.join(annotation_dir, fileName))
+    bioc_passage = annotation_file[0].passages[0]
+    entities = []
+
+    for entity in bioc_passage.annotations:
+        if entity.infons['type'] not in type_we_care:
+            continue
+
+        entity_ = Entity()
+        entity_.id = entity.id
+        processed_name = entity.text.replace('\\n', ' ')
+        if len(processed_name) == 0:
+            logging.debug("{}: entity {} name is empty".format(fileName, entity.id))
+            continue
+        entity_.name = processed_name
+        entity_.type = entity.infons['type']
+        entity_.spans.append([entity.locations[0].offset, entity.locations[0].end])
+
+        if ('SNOMED code' in entity.infons and entity.infons['SNOMED code'] != 'N/A') \
+                and ('SNOMED term' in entity.infons and entity.infons['SNOMED term'] != 'N/A'):
+            entity_.norm_ids.append(entity.infons['SNOMED code'])
+            entity_.norm_names.append(entity.infons['SNOMED term'])
+
+        elif ('MedDRA code' in entity.infons and entity.infons['MedDRA code'] != 'N/A') \
+                and ('MedDRA term' in entity.infons and entity.infons['MedDRA term'] != 'N/A'):
+            entity_.norm_ids.append(entity.infons['MedDRA code'])
+            entity_.norm_names.append(entity.infons['MedDRA term'])
+        else:
+            logging.debug("{}: no norm id in entity {}".format(fileName, entity.id))
+            # some entities may have no norm id
+            continue
+
+        entities.append(entity_)
+
+    document.entities = entities
+
+    corpus_file = get_text_file(os.path.join(corpus_dir, fileName.split('.bioc')[0]))
+    document.text = corpus_file
+
+    return document
+
 
 if opt.whattodo == 1:
 
@@ -428,61 +550,15 @@ if opt.whattodo == 1:
 
     train(train_data, dev_data, test_data, d, UMLS_dict, UMLS_dict_reverse, opt, None, False)
 
-else:
+elif opt.whattodo == 2:
 
-    type_we_care = set(['ADE', 'SSLIF', 'Indication'])
+
 
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
 
-    from my_utils import get_bioc_file, get_text_file
-    import metamap
-
-    def parse_one_gold_file(annotation_dir, corpus_dir, fileName):
-        document = Document()
-        document.name = fileName[:fileName.find('.')]
-
-        annotation_file = get_bioc_file(os.path.join(annotation_dir, fileName))
-        bioc_passage = annotation_file[0].passages[0]
-        entities = []
-
-        for entity in bioc_passage.annotations:
-            if entity.infons['type'] not in type_we_care:
-                continue
-
-            entity_ = Entity()
-            entity_.id = entity.id
-            processed_name = entity.text.replace('\\n', ' ')
-            if len(processed_name) == 0:
-                logging.debug("{}: entity {} name is empty".format(fileName, entity.id))
-                continue
-            entity_.name = processed_name
-            entity_.type = entity.infons['type']
-            entity_.spans.append([entity.locations[0].offset, entity.locations[0].end])
-
-            if ('SNOMED code' in entity.infons and entity.infons['SNOMED code'] != 'N/A') \
-                    and ('SNOMED term' in entity.infons and entity.infons['SNOMED term'] != 'N/A'):
-                entity_.norm_ids.append(entity.infons['SNOMED code'])
-                entity_.norm_names.append(entity.infons['SNOMED term'])
-
-            elif ('MedDRA code' in entity.infons and entity.infons['MedDRA code'] != 'N/A') \
-                    and ('MedDRA term' in entity.infons and entity.infons['MedDRA term'] != 'N/A'):
-                entity_.norm_ids.append(entity.infons['MedDRA code'])
-                entity_.norm_names.append(entity.infons['MedDRA term'])
-            else:
-                logging.debug("{}: no norm id in entity {}".format(fileName, entity.id))
-                # some entities may have no norm id
-                continue
-
-            entities.append(entity_)
-
-        document.entities = entities
-
-        corpus_file = get_text_file(os.path.join(corpus_dir, fileName.split('.bioc')[0]))
-        document.text = corpus_file
-
-        return document
-
+    from collections import OrderedDict
+    import json
     def metamap_ner_my_norm(d):
         print("load umls ...")
 
@@ -506,6 +582,9 @@ else:
         ct_norm_gold = 0
         ct_norm_correct = 0
 
+        correct_counter = Counter()
+        wrong_counter = Counter()
+
         for gold_file_name in annotation_files:
             print("# begin {}".format(gold_file_name))
             gold_document = parse_one_gold_file(annotation_dir, corpus_dir, gold_file_name)
@@ -528,11 +607,25 @@ else:
             model.process_one_doc(gold_document, pred_entities, UMLS_dict, UMLS_dict_reverse)
 
 
-            p1, p2, p3 = evaluate_for_ehr(gold_document.entities, pred_entities, UMLS_dict)
+            p1, p2, p3 = evaluate_for_ehr(gold_document.entities, pred_entities, UMLS_dict,
+                                          predict_document.entities, correct_counter, wrong_counter)
 
             ct_norm_gold += p1
             ct_norm_predict += p2
             ct_norm_correct += p3
+
+
+
+
+        sorted_correct_entities = OrderedDict(correct_counter.most_common())
+        sorted_correct_entities = json.dumps(sorted_correct_entities, indent=4)
+        with codecs.open("sorted_correct_entities.txt", 'w', 'UTF-8') as fp:
+            fp.write(sorted_correct_entities)
+
+        sorted_wrong_entities = OrderedDict(wrong_counter.most_common())
+        sorted_wrong_entities = json.dumps(sorted_wrong_entities, indent=4)
+        with codecs.open("sorted_wrong_entities.txt", 'w', 'UTF-8') as fp:
+            fp.write(sorted_wrong_entities)
 
         p = ct_norm_correct * 1.0 / ct_norm_predict
         r = ct_norm_correct * 1.0 / ct_norm_gold
@@ -543,6 +636,167 @@ else:
     d = data.Data(opt)
 
     metamap_ner_my_norm(d)
+
+else:
+    import matplotlib.pyplot as plt
+    def make_heatmaps(model, tokens, attention_values, cmap_val, words_or_sent=True, fig_size_v=10, model_name="Model"):
+        models = [model]
+        attention_values = np.array([attention_values])
+        fig, ax = plt.subplots()
+        im = ax.imshow(attention_values, cmap=cmap_val)
+
+        # We want to show all ticks...
+        ax.set_xticks(np.arange(len(tokens)))
+        # ax.set_yticks(np.arange(len(models)))
+        plt.yticks([])
+        # ... and label them with the respective list entries
+        ax.set_xticklabels(tokens, fontsize=14)
+        # ax.set_yticklabels(models)
+
+        # Rotate the tick labels and set their alignment.
+        plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+                 rotation_mode="anchor")
+
+        # ax.set_title(model_name)
+        if (words_or_sent):
+            fig.set_size_inches(fig_size_v, 2)
+        else:
+            fig.set_size_inches(7, 2)
+        plt.show()
+
+    logger = logging.getLogger()
+    if opt.verbose:
+        logger.setLevel(logging.DEBUG)
+    else:
+        logger.setLevel(logging.INFO)
+
+    logging.info(opt)
+
+    d = data.Data(opt)
+
+    logging.info(d.config)
+
+    logging.info("load dict ...")
+    UMLS_dict, UMLS_dict_reverse = umls.load_umls_MRCONSO(d.config['norm_dict'])
+
+    annotation_dir = os.path.join(opt.test_file, 'bioc')
+    corpus_dir = os.path.join(opt.test_file, 'txt')
+    annotation_files = [f for f in os.listdir(annotation_dir) if os.path.isfile(os.path.join(annotation_dir, f))]
+
+    tokenizer = BertTokenizer.from_pretrained(opt.bert_dir)
+
+    if opt.test_in_cpu:
+        model = torch.load(os.path.join(opt.output, 'norm_neural.pkl'), map_location='cpu')
+    else:
+        model = torch.load(os.path.join(opt.output, 'norm_neural.pkl'))
+    model.eval()
+
+    attention_model = DotAttentionLayer(768)
+    file_count = 0
+    for gold_file_name in annotation_files:
+        print("# begin {}".format(gold_file_name))
+
+        if file_count < 1:
+            file_count += 1
+            continue
+
+        file_count += 1
+
+        gold_document = parse_one_gold_file(annotation_dir, corpus_dir, gold_file_name)
+
+        pred_entities = []
+        for gold in gold_document.entities:
+            pred = Entity()
+            pred.id = gold.id
+            pred.type = gold.type
+            pred.spans = gold.spans
+            pred.section = gold.section
+            pred.name = gold.name
+            pred_entities.append(pred)
+
+        Xs, Ys = generate_instances_ehr(pred_entities, model.dict_alphabet, UMLS_dict_reverse)
+
+        data_loader = DataLoader(MyDataset(Xs, Ys), opt.batch_size, shuffle=False, collate_fn=my_collate)
+        data_iter = iter(data_loader)
+        num_iter = len(data_loader)
+
+        entity_start = 0
+
+        for i in range(num_iter):
+
+            x, mask, sentences, _, lengths = next(data_iter)
+
+            encoded_layers, y_pred = model.forward(x, sentences, mask)
+
+            values, indices = torch.max(y_pred, 1)
+
+            actual_batch_size = x.size(0)
+
+            if entity_start < 35:
+                entity_start += actual_batch_size
+                continue
+            elif entity_start > 40:
+                break
+
+            for batch_idx in range(actual_batch_size):
+                predict_entity = pred_entities[entity_start + batch_idx]
+                norm_id = get_dict_name(model.dict_alphabet, indices[batch_idx].item())
+
+                concept = UMLS_dict[norm_id]
+                predict_entity.norm_ids.append(norm_id)
+                predict_entity.norm_names.append(concept.names)
+
+                gold_entity = gold_document.entities[entity_start + batch_idx]
+                if len(gold_entity.norm_ids) == 0:
+                    # if gold_entity not annotated, we count it as TP
+                    pass
+                else:
+
+                    if len(predict_entity.norm_ids) != 0 and predict_entity.norm_ids[0] in UMLS_dict:
+                        concept = UMLS_dict[predict_entity.norm_ids[0]]
+
+                        if gold_entity.norm_ids[0] in concept.codes:
+
+                            # correct
+                            logging.info("correct | mention: {} | gold entity: {} | pred entity: {}".format(gold_entity.name, gold_entity.norm_names[0],
+                                                                                              predict_entity.norm_names[
+                                                                                                  0]))
+                            encoded_layers = encoded_layers[:, 1:-1, :]
+                            lengths = lengths - 2
+                            attention_weight = attention_model.forward(encoded_layers, lengths)
+
+                            tokens = []
+                            for token in tokenizer.tokenize(gold_entity.name):
+                                if token in stop_word:
+                                    continue
+                                token = word_preprocess(token)
+                                tokens.append(token)
+
+                            # logging.info(attention_weight)
+                            # make_heatmaps("model1", tokens, attention_weight[0].detach().numpy(), "GnBu")
+                        else:
+                            # wrong
+                            logging.info("wrong | mention: {} | gold entity: {} | pred entity: {}".format(gold_entity.name, gold_entity.norm_names[0],
+                                                                                              predict_entity.norm_names[
+                                                                                                  0]))
+                            encoded_layers = encoded_layers[:, 1:-1, :]
+                            lengths = lengths - 2
+                            attention_weight = attention_model.forward(encoded_layers, lengths)
+
+                            tokens = []
+                            for token in tokenizer.tokenize(gold_entity.name):
+                                if token in stop_word:
+                                    continue
+                                token = word_preprocess(token)
+                                tokens.append(token)
+
+                            # logging.info(attention_weight)
+                            make_heatmaps("model1", tokens, attention_weight[0].detach().numpy(), "GnBu")
+
+            entity_start += actual_batch_size
+
+
+        break
 
 
 

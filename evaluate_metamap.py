@@ -85,7 +85,7 @@ def metamap_ner_re(d):
 
 
     for gold_file_name in annotation_files:
-
+        print("######## begin file {}".format(gold_file_name))
         gold_document = parse_one_gold_file(annotation_dir, corpus_dir, gold_file_name)
 
         predict_document = metamap.load_metamap_result_from_file(join(predict_dir, gold_file_name[:gold_file_name.find('.')]+".field.txt"))
@@ -198,6 +198,6 @@ if __name__=="__main__":
 
     d = data.Data(opt)
 
-    # metamap_ner_re(d)
-    metamap_ner_my_norm(d)
+    metamap_ner_re(d)
+    #metamap_ner_my_norm(d)
 

@@ -55,4 +55,16 @@ if __name__ == '__main__':
 
     # transfer_meddra_to_multi_seive_dict_format('/Users/feili/resource/meddra/meddra_20_1_english/MedAscii/pt.asc',
     #                                            '/Users/feili/PycharmProjects/norm/meddra_dict.txt')
-    pass
+
+    import pytreebank
+
+    dataset = pytreebank.load_sst('/Users/feili/dataset/sst/trees')
+    example = dataset["train"][0]
+
+    # extract spans from the tree.
+    for label, sentence in example.to_labeled_lines():
+        print("%s has sentiment label %s" % (
+            sentence,
+            ["very negative", "negative", "neutral", "positive", "very positive"][label]
+        ))
+

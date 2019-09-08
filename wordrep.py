@@ -6,7 +6,7 @@ import torch.nn.functional as F
 import numpy as np
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 from charcnn import CharCNN
-from elmoformanylangs import Embedder
+#from elmoformanylangs import Embedder
 import logging
 
 class WordRep(nn.Module):
